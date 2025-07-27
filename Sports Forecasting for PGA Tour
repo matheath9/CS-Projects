@@ -1,0 +1,225 @@
+# %%
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.neighbors import KNeighborsRegressor
+from sklearn.linear_model import Ridge,Lasso
+from sklearn.tree import DecisionTreeRegressor
+from sklearn.model_selection import cross_val_score
+
+# %%
+# Read Data frames 
+open24 = pd.read_csv(r'C:\Users\matan\Downloads\Python Codes\src\Data\2024_the_open_event_values.csv')
+open23 = pd.read_csv(r'C:\Users\matan\Downloads\Python Codes\src\Data\2023_the_open_event_values.csv')
+open22 = pd.read_csv(r'C:\Users\matan\Downloads\Python Codes\src\Data\2022_the_open_event_values.csv')
+open21 = pd.read_csv(r'C:\Users\matan\Downloads\Python Codes\src\Data\2021_the_open_event_values.csv')
+open19 = pd.read_csv(r'C:\Users\matan\Downloads\Python Codes\src\Data\2019_the_open_event_values.csv')
+courseDifficulty=pd.read_csv(r'C:\Users\matan\Downloads\Python Codes\src\Data\dg_course_table.csv')
+
+# %%
+valid_courses = [
+    "St. Andrews Links (Old Course)",
+    "Royal Liverpool",
+    "Royal Troon"
+]
+
+filtered_cd=courseDifficulty[courseDifficulty['course'].isin(valid_courses)].copy()
+
+# %%
+open24["year"]=2024
+open23["year"]=2023
+open22["year"]=2022
+
+# Create a mapping dict from course to year
+course_year_map = {
+    "St. Andrews Links (Old Course)": 2022,
+    "Royal Liverpool": 2023,
+    "Royal Troon": 2024
+}
+
+# Add a new 'year' column by mapping course names
+filtered_cd['year'] = filtered_cd['course'].map(course_year_map)
+
+filtered_cd
+
+
+# %%
+open_all=pd.concat([open24, open23, open22], ignore_index=True)
+print(open_all.head())
+print(open_all["year"].value_counts())
+
+# %%
+merged_df = open_all.merge(
+    filtered_cd,
+    on=['year'],
+    how='left',  # keep all players even if no course difficulty info found
+    suffixes=('', '_course')
+)
+
+# %%
+merged_df.to_csv(r'C:\Users\matan\Downloads\Python Codes\src\Data\open_merged.csv', index=False)
+
+# %%
+merged_df['made_cut'] = merged_df['r4_score'].notnull().astype(int)
+
+# %%
+# Exclude 'player_name' and 'position' if they're not numeric
+cols_to_convert = [col for col in merged_df.columns if col not in ['player_name', 'position']]
+
+for col in cols_to_convert:
+    merged_df[col] = pd.to_numeric(merged_df[col], errors='coerce')
+
+
+# %%
+merged_df['sg_putt']=merged_df['sg_putt']-merged_df['putt_sg']
+merged_df['sg_arg_']=merged_df['sg_arg']-merged_df['arg_sg']
+merged_df['sg_app']=merged_df['sg_app']-merged_df['app_sg']
+merged_df['sg_ott']=merged_df['sg_ott']-merged_df['ott_sg']
+
+# %%
+X=merged_df[['sg_putt', 'sg_arg', 'sg_app', 'sg_ott']]
+y=merged_df['made_cut']
+
+# %%
+X = X.dropna()
+y = y.loc[X.index]  # Make sure y matches the filtered X rows
+
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+
+
+# %%
+from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.metrics import accuracy_score, classification_report
+from sklearn.calibration import CalibratedClassifierCV
+
+# Train-test split
+X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, test_size=0.2, random_state=123)
+
+# Train model
+model = LogisticRegression()
+model.fit(X_train, y_train)
+calibrated= CalibratedClassifierCV(model,method='isotonic',cv='prefit')
+
+# Predict and evaluate
+prediction = model.predict(X_test)
+print("Accuracy:", accuracy_score(y_test, prediction))
+print(classification_report(y_test, prediction))
+
+# %%
+# Confusion matrix
+from sklearn.metrics import ConfusionMatrixDisplay
+
+ConfusionMatrixDisplay.from_estimator(model, X_test, y_test)
+plt.show()
+
+# %%
+# Feature importance
+pd.Series(model.coef_[0], index=X.columns).sort_values(ascending=False)
+
+
+# %%
+# Function for Model
+def rescale_probs(probs, min_prob=0.05, max_prob=0.80):
+    """
+    Rescale probabilities linearly to a given range.
+    """
+    probs = np.clip(probs, 1e-6, 1-1e-6)  # avoid exact 0 or 1
+    scaled = (probs - probs.min()) / (probs.max() - probs.min())
+    return scaled * (max_prob - min_prob) + min_prob
+
+
+def predict_cut_probabilities_tourny(data, model, scaler):
+    """
+    Predict and print the probability of making the cut for each player (rescaled).
+    """
+    # Drop columns not used for prediction
+    X_new = data.drop(columns=['player_name', 'year', 'r4_score', 'position', 'total_score', 'sg_total', 'sg_t2g'])
+    
+    # Scale features
+    X_new_scaled = scaler.transform(X_new)
+    
+    # Predict raw probabilities
+    probs_raw = model.predict_proba(X_new_scaled)[:, 1]
+    
+    # Rescale probabilities
+    probs = rescale_probs(probs_raw, min_prob=0.05, max_prob=0.80)
+    
+    # Zip names and probabilities
+    results = list(zip(data['player_name'], probs))
+    
+    # Print formatted output
+    for name, prob in results:
+        print(f"{name}: {prob:.1%} chance of making the cut")
+
+        
+        
+
+def predict_cut_probabilities_sg(data, model, scaler, feature_columns):
+    """
+    Predict and print the probability of making the cut for each player (rescaled).
+    """
+    # Convert object columns to numeric where applicable
+    for col in data.columns:
+        if col not in ['player_name', 'year'] and data[col].dtype == 'object':
+            data[col] = pd.to_numeric(data[col], errors='coerce')
+    
+    # Drop rows with missing values in the required features
+    data = data.dropna(subset=feature_columns)
+    
+    # Select only the feature columns used during training
+    X_new = data[feature_columns]
+    
+    # Scale features
+    X_new_scaled = scaler.transform(X_new)
+    
+    # Predict raw probabilities
+    probs_raw = model.predict_proba(X_new_scaled)[:, 1]
+    
+    # Rescale probabilities
+    probs = rescale_probs(probs_raw, min_prob=0.05, max_prob=0.80)
+    
+    # Zip names and probabilities
+    results = list(zip(data['player_name'], probs))
+    
+    # Print formatted output
+    for name, prob in results:
+        print(f"{name}: {prob:.1%} chance of making the cut")
+    
+    return results
+
+
+
+
+# %%
+# Prepare the Open 2025 Field data for prediction
+sg_Open_Field25 = pd.read_csv(r'C:\Users\matan\Downloads\Python Codes\src\Data\sg_Open_Field25.csv')
+sg_Open_Field25 = sg_Open_Field25.rename(columns={
+    'putt_true': 'sg_putt',
+    'arg_true': 'sg_arg',
+    'app_true': 'sg_app',
+    'ott_true': 'sg_ott',
+})
+
+sg_Open_Field25['year'] = 2025
+
+sg_Open_Field25= sg_Open_Field25.drop(columns=['events_played','wins','x_wins','x_wins_majors','rounds_played','shotlink_played'])
+
+# %%
+feature_columns=X.columns.tolist()
+
+Open25_Predictions = predict_cut_probabilities_sg(sg_Open_Field25, model, scaler, feature_columns)
+print(Open25_Predictions)
+
+# %%
+
+
+
